@@ -54,10 +54,25 @@ async function startWhatsApp() {
   } catch (err) { console.error('Erro:', err); connectionStatus = 'disconnected'; }
 }
 
-function formatPhone(raw) {
+// Tenta formatos brasileiros: com e sem o 9° dígito
+function buildJids(raw) {
   const digits = raw.replace(/\D/g, '');
-  const full = digits.startsWith('55') ? digits : '55' + digits;
-  return full + '@s.whatsapp.net';
+  // Garantir country code 55
+  const withCC = digits.startsWith('55') ? digits : '55' + digits;
+  const jids = [withCC + '@s.whatsapp.net'];
+  
+  // Brasil: DDD (2) + número
+  // Se tem 12 dígitos (55 + DDD + 8 dígitos), adicionar versão com 9
+  if (withCC.length === 12) {
+    const com9 = withCC.slice(0, 4) + '9' + withCC.slice(4);
+    jids.unshift(com9 + '@s.whatsapp.net'); // tenta primeiro o com 9
+  }
+  // Se tem 13 dígitos (55 + DDD + 9 dígitos), também tenta sem o 9
+  if (withCC.length === 13) {
+    const sem9 = withCC.slice(0, 4) + withCC.slice(5);
+    jids.push(sem9 + '@s.whatsapp.net');
+  }
+  return jids;
 }
 
 app.get('/api/wa/status', (req, res) => res.json({ status: connectionStatus, phone: connectedPhone, hasQR: !!qrBase64 }));
@@ -66,7 +81,31 @@ app.post('/api/wa/send', async (req, res) => {
   if (connectionStatus !== 'connected' || !sock) return res.status(503).json({ error: 'WhatsApp nao conectado' });
   const { to, message } = req.body;
   if (!to || !message) return res.status(400).json({ error: 'Campos to e message sao obrigatorios' });
-  try { await sock.sendMessage(formatPhone(to), { text: message }); res.json({ ok: true }); }
+  try {
+    const jids = buildJids(to);
+    let sentTo = null;
+    
+    // Tentar cada formato de JID
+    for (const jid of jids) {
+      try {
+        // Verificar se o numero existe no WhatsApp
+        const [result] = await sock.onWhatsApp(jid);
+        if (result?.exists) {
+          await sock.sendMessage(result.jid, { text: message });
+          sentTo = result.jid;
+          break;
+        }
+      } catch { /* tentar próximo formato */ }
+    }
+    
+    if (sentTo) {
+      res.json({ ok: true, sentTo });
+    } else {
+      // Número não encontrado — enviar assim mesmo no primeiro formato
+      await sock.sendMessage(jids[0], { text: message });
+      res.json({ ok: true, sentTo: jids[0], warn: 'Numero nao verificado no WhatsApp' });
+    }
+  }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post('/api/wa/disconnect', async (req, res) => {
