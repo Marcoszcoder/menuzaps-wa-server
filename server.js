@@ -86,6 +86,24 @@ app.get('/api/wa/restart', async (req, res) => {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.get('/', (req, res) => res.json({ service: 'MenuZaps WA Server', status: connectionStatus }));
 
-app.listen(PORT, () => { console.log('MenuZaps WA Server na porta ' + PORT); startWhatsApp(); });
+// ── Keep-alive ping endpoint ───────────────────────────────────
+app.get('/ping', (req, res) => res.json({ ok: true, time: new Date().toISOString(), status: connectionStatus }));
+app.get('/', (req, res) => res.json({ service: 'MenuZaps WA Server', status: connectionStatus, phone: connectedPhone }));
+
+app.listen(PORT, () => {
+  console.log('MenuZaps WA Server na porta ' + PORT);
+  startWhatsApp();
+
+  // ── Self-ping a cada 10 minutos para não dormir no Render ─────
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  setInterval(async () => {
+    try {
+      const { default: https } = await import(SELF_URL.startsWith('https') ? 'https' : 'http');
+      https.get(`${SELF_URL}/ping`, (r) => {
+        console.log(`Keep-alive ping → ${r.statusCode} | WA: ${connectionStatus}`);
+      }).on('error', () => {});
+    } catch {}
+  }, 10 * 60 * 1000); // 10 minutos
+});
+
