@@ -126,15 +126,343 @@ app.get('/api/wa/restart', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// ——— ABACATEPAY & FINANCE MANAGEMENT ———
+// ═══════════════════════════════════════════════════════════════
+const ABACATEPAY_API_KEY = process.env.ABACATEPAY_API_KEY || 'abc_prod_YAA2SUwQbqgBBTBxTSzr1CJU';
+const ABACATEPAY_WEBHOOK_SECRET = process.env.ABACATEPAY_WEBHOOK_SECRET || 'mz_whsec_99762785abacate';
+
+const PAYMENTS_FILE = path.join(__dirname, '.payments_data.json');
+
+function loadPaymentsData() {
+  try {
+    if (fs.existsSync(PAYMENTS_FILE)) {
+      return JSON.parse(fs.readFileSync(PAYMENTS_FILE, 'utf8'));
+    }
+  } catch(e) {}
+  return {
+    balance: 0,
+    totalSales: 0,
+    transactions: [],
+    withdrawals: []
+  };
+}
+
+function savePaymentsData(data) {
+  try {
+    fs.writeFileSync(PAYMENTS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch(e) {
+    console.error('Erro ao salvar dados de pagamento:', e);
+  }
+}
+
+// ── 1. Criar Cobrança Pix AbacatePay ──────────────────────────
+app.post('/api/payment/create-pix', async (req, res) => {
+  try {
+    const { orderId, amount, clientName, clientPhone, clientEmail, itemsDescription } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'Valor inválido' });
+    }
+
+    const priceInCents = Math.round(Number(amount) * 100);
+    const orderNum = orderId || Math.floor(1000 + Math.random() * 9000);
+
+    // 1. Criar produto dinâmico para a cobrança
+    const prodRes = await fetch('https://api.abacatepay.com/v2/products/create', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        externalId: `order_${orderNum}_${Date.now()}`,
+        name: `Pedido MenuZaps #${orderNum}`,
+        description: itemsDescription || `Pedido #${orderNum} - ${clientName || 'Cliente'}`,
+        price: priceInCents,
+        currency: 'BRL'
+      })
+    });
+
+    const prodData = await prodRes.json();
+    if (!prodData.success || !prodData.data?.id) {
+      return res.status(500).json({ ok: false, error: prodData.error || 'Falha ao criar produto na AbacatePay' });
+    }
+
+    const productId = prodData.data.id;
+
+    // 2. Criar checkout Pix
+    const checkRes = await fetch('https://api.abacatepay.com/v2/checkouts/create', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        frequency: 'ONE_TIME',
+        methods: ['PIX'],
+        items: [
+          {
+            id: productId,
+            quantity: 1
+          }
+        ],
+        customer: {
+          name: clientName || 'Cliente MenuZaps',
+          cellphone: clientPhone ? clientPhone.replace(/\D/g, '') : '66999762785',
+          email: clientEmail || 'cliente@menuzaps.com'
+        },
+        returnUrl: 'https://menuzaps.vercel.app/cardapio.html?payment=success',
+        completionUrl: 'https://menuzaps.vercel.app/cardapio.html?payment=success'
+      })
+    });
+
+    const checkData = await checkRes.json();
+    if (!checkData.success || !checkData.data?.url) {
+      return res.status(500).json({ ok: false, error: checkData.error || 'Falha ao gerar checkout Pix' });
+    }
+
+    const billing = checkData.data;
+
+    // Registrar transação pendente no storage
+    const db = loadPaymentsData();
+    const newTx = {
+      billingId: billing.id,
+      orderId: orderNum,
+      clientName: clientName || 'Cliente',
+      clientPhone: clientPhone || '',
+      grossAmount: Number(amount),
+      fee: (billing.platformFee || 100) / 100,
+      netAmount: Math.max(0, Number(amount) - ((billing.platformFee || 100) / 100)),
+      paymentUrl: billing.url,
+      status: 'PENDING',
+      createdAt: new Date().toISOString()
+    };
+    db.transactions.unshift(newTx);
+    savePaymentsData(db);
+
+    res.json({
+      ok: true,
+      billingId: billing.id,
+      paymentUrl: billing.url,
+      orderId: orderNum,
+      amount: Number(amount)
+    });
+  } catch (err) {
+    console.error('Erro create-pix:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 2. Checar Status de Cobrança ──────────────────────────────
+app.get('/api/payment/status/:billingId', async (req, res) => {
+  try {
+    const { billingId } = req.params;
+    const db = loadPaymentsData();
+    const tx = db.transactions.find(t => t.billingId === billingId);
+
+    // Consultar na AbacatePay
+    const apiRes = await fetch(`https://api.abacatepay.com/v2/checkouts/list`, {
+      headers: {
+        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    const apiData = await apiRes.json();
+    const foundBill = apiData.data?.find(b => b.id === billingId);
+
+    if (foundBill) {
+      const isPaid = foundBill.status === 'PAID';
+      if (tx && tx.status !== 'PAID' && isPaid) {
+        tx.status = 'PAID';
+        tx.paidAt = new Date().toISOString();
+        db.balance += tx.netAmount;
+        db.totalSales += tx.grossAmount;
+        savePaymentsData(db);
+      }
+      return res.json({ ok: true, status: foundBill.status, isPaid, tx });
+    }
+
+    res.json({ ok: true, status: tx?.status || 'PENDING', isPaid: tx?.status === 'PAID', tx });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 3. Webhook de Confirmação AbacatePay ───────────────────────
+app.post('/api/payment/webhook', async (req, res) => {
+  try {
+    const secretQuery = req.query.secret;
+    const secretHeader = req.headers['abacatepay-signature'] || req.headers['x-webhook-secret'];
+
+    // Validação de Secret
+    if (secretQuery && secretQuery !== ABACATEPAY_WEBHOOK_SECRET && secretHeader !== ABACATEPAY_WEBHOOK_SECRET) {
+      console.warn('Webhook recebido com secret inválido');
+    }
+
+    const payload = req.body;
+    console.log('Webhook AbacatePay recebido:', JSON.stringify(payload));
+
+    const event = payload.event || payload.type;
+    const data = payload.data || payload;
+
+    if (event === 'billing.paid' || data.status === 'PAID' || event === 'BILLING_PAID') {
+      const billingId = data.id;
+      const db = loadPaymentsData();
+      const tx = db.transactions.find(t => t.billingId === billingId);
+
+      if (tx && tx.status !== 'PAID') {
+        tx.status = 'PAID';
+        tx.paidAt = new Date().toISOString();
+        db.balance += tx.netAmount;
+        db.totalSales += tx.grossAmount;
+        savePaymentsData(db);
+
+        // Notificar restaurante via WhatsApp se conectado
+        if (connectionStatus === 'connected' && sock && connectedPhone) {
+          try {
+            const jids = buildJids(connectedPhone);
+            await sock.sendMessage(jids[0], {
+              text: `🟢 *PIX RECEBIDO COM SUCESSO!*\n\n` +
+                    `📦 *Pedido:* #${tx.orderId}\n` +
+                    `👤 *Cliente:* ${tx.clientName}\n` +
+                    `💰 *Valor Bruto:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n` +
+                    `💵 *Valor Líquido:* R$ ${tx.netAmount.toFixed(2).replace('.', ',')}\n` +
+                    `✨ O saldo já está disponível no seu painel!`
+            });
+          } catch(e) {
+            console.error('Erro ao notificar via WA:', e);
+          }
+        }
+      }
+    }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error('Erro no webhook:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── 4. Resumo Financeiro & Saldo ──────────────────────────────
+app.get('/api/payment/finance-summary', (req, res) => {
+  try {
+    const db = loadPaymentsData();
+    const today = new Date().toISOString().slice(0, 10);
+    const todaySales = db.transactions
+      .filter(t => t.status === 'PAID' && t.createdAt.startsWith(today))
+      .reduce((acc, t) => acc + t.grossAmount, 0);
+
+    const totalWithdrawn = db.withdrawals
+      .filter(w => w.status === 'COMPLETED')
+      .reduce((acc, w) => acc + w.amount, 0);
+
+    res.json({
+      ok: true,
+      balance: Math.max(0, db.balance),
+      totalSales: db.totalSales,
+      todaySales: todaySales,
+      totalWithdrawn: totalWithdrawn,
+      transactions: db.transactions.slice(0, 50),
+      withdrawals: db.withdrawals.slice(0, 20)
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 5. Solicitar Saque Pix ────────────────────────────────────
+app.post('/api/payment/request-withdrawal', (req, res) => {
+  try {
+    const { amount, pixKey, pixKeyType } = req.body;
+    const withdrawAmount = Number(amount);
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res.status(400).json({ ok: false, error: 'Valor de saque inválido' });
+    }
+    if (!pixKey) {
+      return res.status(400).json({ ok: false, error: 'Chave Pix é obrigatória' });
+    }
+
+    const db = loadPaymentsData();
+    if (db.balance < withdrawAmount) {
+      return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível: R$ ${db.balance.toFixed(2).replace('.', ',')}` });
+    }
+
+    db.balance -= withdrawAmount;
+    const newWithdrawal = {
+      id: 'wd_' + Date.now(),
+      amount: withdrawAmount,
+      pixKey: pixKey,
+      pixKeyType: pixKeyType || 'CPF/CNPJ',
+      status: 'COMPLETED',
+      requestedAt: new Date().toISOString()
+    };
+    db.withdrawals.unshift(newWithdrawal);
+    savePaymentsData(db);
+
+    res.json({
+      ok: true,
+      message: `Saque de R$ ${withdrawAmount.toFixed(2).replace('.', ',')} solicitado para a chave ${pixKey}!`,
+      newBalance: db.balance,
+      withdrawal: newWithdrawal
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 6. Simular Venda Pix (Para testes rápidos do dono) ─────────
+app.post('/api/payment/simulate-pix', (req, res) => {
+  try {
+    const { orderId, amount, clientName } = req.body;
+    const val = Number(amount) || 32.90;
+    const orderNum = orderId || Math.floor(1000 + Math.random() * 9000);
+    const fee = 0.80;
+    const net = Math.max(0, val - fee);
+
+    const db = loadPaymentsData();
+    const newTx = {
+      billingId: 'sim_' + Date.now(),
+      orderId: orderNum,
+      clientName: clientName || 'Cliente Simulação',
+      clientPhone: '66999762785',
+      grossAmount: val,
+      fee: fee,
+      netAmount: net,
+      paymentUrl: '#',
+      status: 'PAID',
+      createdAt: new Date().toISOString(),
+      paidAt: new Date().toISOString()
+    };
+    db.transactions.unshift(newTx);
+    db.balance += net;
+    db.totalSales += val;
+    savePaymentsData(db);
+
+    res.json({
+      ok: true,
+      message: `Pix simulado de R$ ${val.toFixed(2).replace('.', ',')} creditado com sucesso!`,
+      newBalance: db.balance,
+      tx: newTx
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Keep-alive ping endpoint ───────────────────────────────────
 app.get('/ping', (req, res) => res.json({ ok: true, time: new Date().toISOString(), status: connectionStatus }));
-app.get('/', (req, res) => res.json({ service: 'MenuZaps WA Server', status: connectionStatus, phone: connectedPhone }));
+app.get('/', (req, res) => res.json({
+  service: 'MenuZaps WA & Payments Server',
+  status: connectionStatus,
+  phone: connectedPhone,
+  abacatePay: 'Active (v2)'
+}));
 
 app.listen(PORT, () => {
-  console.log('MenuZaps WA Server na porta ' + PORT);
+  console.log('MenuZaps Server na porta ' + PORT);
   startWhatsApp();
 
-  // ── Self-ping a cada 10 minutos para não dormir no Render ─────
+  // Self-ping a cada 10 minutos para não dormir no Render
   const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
   setInterval(async () => {
     try {
@@ -143,6 +471,7 @@ app.listen(PORT, () => {
         console.log(`Keep-alive ping → ${r.statusCode} | WA: ${connectionStatus}`);
       }).on('error', () => {});
     } catch {}
-  }, 10 * 60 * 1000); // 10 minutos
+  }, 10 * 60 * 1000);
 });
+
 
