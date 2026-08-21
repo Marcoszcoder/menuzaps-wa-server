@@ -130,7 +130,8 @@ app.get('/api/wa/restart', async (req, res) => {
 // ——— ABACATEPAY & FINANCE MANAGEMENT ———
 // ═══════════════════════════════════════════════════════════════
 const ABACATEPAY_API_KEY = process.env.ABACATEPAY_API_KEY || 'abc_prod_YAA2SUwQbqgBBTBxTSzr1CJU';
-const ABACATEPAY_WEBHOOK_SECRET = process.env.ABACATEPAY_WEBHOOK_SECRET || 'mz_whsec_99762785abacate';
+const ABACATEPAY_WEBHOOK_SECRET = process.env.ABACATEPAY_WEBHOOK_SECRET || 'webh_prod_GxjhThqfPrP1ZJ54frXeGaXs';
+const VALID_WEBHOOK_SECRETS = ['webh_prod_GxjhThqfPrP1ZJ54frXeGaXs', 'mz_whsec_99762785abacate'];
 
 const PAYMENTS_FILE = path.join(__dirname, '.payments_data.json');
 
@@ -292,11 +293,12 @@ app.get('/api/payment/status/:billingId', async (req, res) => {
 app.post('/api/payment/webhook', async (req, res) => {
   try {
     const secretQuery = req.query.secret;
-    const secretHeader = req.headers['abacatepay-signature'] || req.headers['x-webhook-secret'];
+    const secretHeader = req.headers['abacatepay-signature'] || req.headers['x-webhook-secret'] || req.headers['webhook-id'];
 
     // Validação de Secret
-    if (secretQuery && secretQuery !== ABACATEPAY_WEBHOOK_SECRET && secretHeader !== ABACATEPAY_WEBHOOK_SECRET) {
-      console.warn('Webhook recebido com secret inválido');
+    const isSecretValid = !secretQuery || VALID_WEBHOOK_SECRETS.includes(secretQuery) || (secretHeader && VALID_WEBHOOK_SECRETS.includes(secretHeader));
+    if (!isSecretValid) {
+      console.warn('Webhook recebido com secret não reconhecido:', secretQuery || secretHeader);
     }
 
     const payload = req.body;
