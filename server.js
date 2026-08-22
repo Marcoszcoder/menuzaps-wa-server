@@ -451,6 +451,71 @@ app.post('/api/payment/simulate-pix', (req, res) => {
   }
 });
 
+
+// ── 7. Criar Pedido Balcão/Entrega (Dinheiro ou Cartão na Entrega) ──
+app.post('/api/orders/create', (req, res) => {
+  try {
+    const { clientName, clientPhone, address, deliveryType, notes, items, amount, paymentMethod, restaurant } = req.body;
+    const orderNum = Math.floor(1000 + Math.random() * 9000);
+    const db = loadPaymentsData();
+    if (!db.orders) db.orders = [];
+
+    const newOrder = {
+      id: orderNum,
+      client: clientName || 'Cliente',
+      phone: clientPhone || '',
+      addr: address || '',
+      type: deliveryType || 'delivery',
+      items: items || 'Itens do Cardápio',
+      notes: notes || '',
+      value: Number(amount) || 0,
+      payment: paymentMethod || 'Dinheiro / Cartão na Entrega',
+      restaurant: restaurant || 'Estabelecimento',
+      status: 'new', // Dinheiro/Cartão entra direto para a cozinha
+      time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      ago: 'agora',
+      createdAt: new Date().toISOString()
+    };
+
+    db.orders.unshift(newOrder);
+    savePaymentsData(db);
+
+    // Notificar WhatsApp se conectado
+    if (connectionStatus === 'connected' && sock && connectedPhone) {
+      try {
+        const jids = buildJids(connectedPhone);
+        sock.sendMessage(jids[0], {
+          text: `🔔 *NOVO PEDIDO RECEBIDO!*\n\n` +
+                `📦 *Pedido:* #${newOrder.id}\n` +
+                `👤 *Cliente:* ${newOrder.client}\n` +
+                `📱 *Telefone:* ${newOrder.phone}\n` +
+                `🛵 *Tipo:* ${newOrder.type === 'delivery' ? 'Entrega' : 'Retirada'}\n` +
+                `📋 *Itens:*\n${newOrder.items}\n` +
+                `💵 *Pagamento:* ${newOrder.payment}\n` +
+                `💰 *Total:* R$ ${newOrder.value.toFixed(2).replace('.', ',')}`
+        }).catch(() => {});
+      } catch(e) {}
+    }
+
+    res.json({ ok: true, order: newOrder });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 8. Listar Pedidos Confirmados para a Central (Kanban) ──
+app.get('/api/orders/live', (req, res) => {
+  try {
+    const db = loadPaymentsData();
+    if (!db.orders) db.orders = [];
+    // Retorna apenas pedidos confirmados (exclui os Pix pendentes de pagamento)
+    const confirmedOrders = db.orders.filter(o => o.status !== 'pending_payment');
+    res.json({ ok: true, orders: confirmedOrders.slice(0, 50) });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Keep-alive ping endpoint ───────────────────────────────────
 app.get('/ping', (req, res) => res.json({ ok: true, time: new Date().toISOString(), status: connectionStatus }));
 app.get('/', (req, res) => res.json({
