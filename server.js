@@ -516,6 +516,59 @@ app.get('/api/orders/live', (req, res) => {
   }
 });
 
+
+// ── 9. Atualizar Etapa do Pedido e Notificar Cliente no WhatsApp ──
+app.post('/api/orders/update-status', async (req, res) => {
+  try {
+    const { orderId, newStatus, clientPhone, clientName, deliveryType, address } = req.body;
+    const db = loadPaymentsData();
+    if (!db.orders) db.orders = [];
+
+    const order = db.orders.find(o => o.id === parseInt(orderId));
+    if (order) {
+      order.status = newStatus;
+      savePaymentsData(db);
+    }
+
+    const phone = clientPhone || order?.phone;
+    const name = clientName || order?.client || 'Cliente';
+    const type = deliveryType || order?.type || 'delivery';
+    const addr = address || order?.addr || '';
+
+    // Enviar mensagem automática correspondente à etapa
+    if (connectionStatus === 'connected' && sock && phone) {
+      try {
+        const jids = buildJids(phone);
+        let msg = '';
+
+        if (newStatus === 'prep') {
+          msg = `👨‍🍳 *Olá, ${name}! Seu pedido #${orderId} está EM PREPARAÇÃO!*\n\nNossos chefs já estão preparando tudo com muito capricho. Em breve sairá para entrega! ⏱️`;
+        } else if (newStatus === 'ready') {
+          if (type === 'delivery') {
+            msg = `📦 *Olá, ${name}! Seu pedido #${orderId} está PRONTO e aguardando o entregador!*\n\nEm poucos minutos sairá para entrega no seu endereço.`;
+          } else {
+            msg = `🏪 *Oba, ${name}! Seu pedido #${orderId} está PRONTO PARA RETIRADA!*\n\nVocê já pode vir retirar no nosso balcão. Te esperamos! 🎉`;
+          }
+        } else if (newStatus === 'out') {
+          msg = `🛵 *Oba, ${name}! Seu pedido #${orderId} SAIU PARA ENTREGA!*\n\nO entregador já está a caminho${addr ? ` de: *${addr}*` : ''}. Fique atento! 📦`;
+        } else if (newStatus === 'done') {
+          msg = `⭐ *Pedido #${orderId} ENTREGUE COM SUCESSO!*\n\nEsperamos que goste muito! Bom apetite e obrigado pela preferência. Volte sempre! 🎉`;
+        }
+
+        if (msg) {
+          await sock.sendMessage(jids[0], { text: msg });
+        }
+      } catch(e) {
+        console.error('Erro ao enviar notificação de etapa:', e);
+      }
+    }
+
+    res.json({ ok: true, status: newStatus });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Keep-alive ping endpoint ───────────────────────────────────
 app.get('/ping', (req, res) => res.json({ ok: true, time: new Date().toISOString(), status: connectionStatus }));
 app.get('/', (req, res) => res.json({
