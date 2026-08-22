@@ -372,13 +372,13 @@ app.get('/api/payment/finance-summary', (req, res) => {
   }
 });
 
-// ── 5. Solicitar Saque Pix ────────────────────────────────────
-app.post('/api/payment/request-withdrawal', (req, res) => {
+// ── 5. Solicitar Saque Pix (AbacatePay Payouts API) ─────────────
+app.post('/api/payment/request-withdrawal', async (req, res) => {
   try {
     const { amount, pixKey, pixKeyType } = req.body;
     const withdrawAmount = Number(amount);
-    if (!withdrawAmount || withdrawAmount <= 0) {
-      return res.status(400).json({ ok: false, error: 'Valor de saque inválido' });
+    if (!withdrawAmount || withdrawAmount < 3.50) {
+      return res.status(400).json({ ok: false, error: 'O valor mínimo para saque via Pix na AbacatePay é de R$ 3,50' });
     }
     if (!pixKey) {
       return res.status(400).json({ ok: false, error: 'Chave Pix é obrigatória' });
@@ -389,25 +389,81 @@ app.post('/api/payment/request-withdrawal', (req, res) => {
       return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível: R$ ${db.balance.toFixed(2).replace('.', ',')}` });
     }
 
-    db.balance -= withdrawAmount;
-    const newWithdrawal = {
-      id: 'wd_' + Date.now(),
-      amount: withdrawAmount,
-      pixKey: pixKey,
-      pixKeyType: pixKeyType || 'CPF/CNPJ',
-      status: 'COMPLETED',
-      requestedAt: new Date().toISOString()
-    };
-    db.withdrawals.unshift(newWithdrawal);
-    savePaymentsData(db);
+    // Mapear tipo de chave Pix para a AbacatePay
+    let abacatePixType = 'RANDOM';
+    const cleanKey = pixKey.replace(/\D/g, '');
+    if (pixKeyType === 'CPF' || cleanKey.length === 11) abacatePixType = 'CPF';
+    else if (pixKeyType === 'CNPJ' || cleanKey.length === 14) abacatePixType = 'CNPJ';
+    else if (pixKey.includes('@')) abacatePixType = 'EMAIL';
+    else if (cleanKey.length >= 10 && cleanKey.length <= 13) abacatePixType = 'PHONE';
 
-    res.json({
-      ok: true,
-      message: `Saque de R$ ${withdrawAmount.toFixed(2).replace('.', ',')} solicitado para a chave ${pixKey}!`,
-      newBalance: db.balance,
-      withdrawal: newWithdrawal
+    // Tentar executar Saque Automático Real via API AbacatePay
+    let apiSuccess = false;
+    let apiErrorMsg = null;
+    let receiptUrl = null;
+
+    try {
+      const amountInCents = Math.round(withdrawAmount * 100);
+      const abacateRes = await fetch('https://api.abacatepay.com/v2/payouts/create', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          amount: amountInCents,
+          externalId: 'wd_' + Date.now(),
+          description: 'Saque MenuZaps',
+          pix: {
+            key: pixKey.trim(),
+            type: abacatePixType
+          }
+        })
+      });
+
+      const abacateData = await abacateRes.json();
+      if (abacateData.success && abacateData.data) {
+        apiSuccess = true;
+        receiptUrl = abacateData.data.receiptUrl;
+      } else {
+        apiErrorMsg = abacateData.error || 'Falha ao processar saque na AbacatePay';
+      }
+    } catch (apiErr) {
+      apiErrorMsg = apiErr.message;
+    }
+
+    // Se a API transferiu com sucesso:
+    if (apiSuccess) {
+      db.balance -= withdrawAmount;
+      const newWithdrawal = {
+        id: 'wd_' + Date.now(),
+        amount: withdrawAmount,
+        pixKey: pixKey,
+        pixKeyType: pixKeyType || 'Pix',
+        status: 'COMPLETED',
+        receiptUrl: receiptUrl,
+        requestedAt: new Date().toISOString()
+      };
+      db.withdrawals.unshift(newWithdrawal);
+      savePaymentsData(db);
+
+      return res.json({
+        ok: true,
+        message: `🎉 Saque de R$ ${withdrawAmount.toFixed(2).replace('.', ',')} enviado com sucesso via Pix para ${pixKey}!`,
+        newBalance: db.balance,
+        withdrawal: newWithdrawal
+      });
+    }
+
+    // Se a função de saque automatizado via API ainda não foi habilitada na conta AbacatePay:
+    return res.status(400).json({
+      ok: false,
+      abacateDisabled: true,
+      error: `Para transferir diretamente pelo botão, habilite a função de Saques/Payouts no painel da AbacatePay. Você também pode sacar todo o seu saldo acumulado diretamente no app da AbacatePay (https://app.abacatepay.com).`
     });
+
   } catch (err) {
+    console.error('Erro request-withdrawal:', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
