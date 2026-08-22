@@ -127,11 +127,12 @@ app.get('/api/wa/restart', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ——— ABACATEPAY & FINANCE MANAGEMENT ———
+// ——— MERCADO PAGO & FINANCE MANAGEMENT ———
 // ═══════════════════════════════════════════════════════════════
-const ABACATEPAY_API_KEY = process.env.ABACATEPAY_API_KEY || 'abc_prod_YAA2SUwQbqgBBTBxTSzr1CJU';
-const ABACATEPAY_WEBHOOK_SECRET = process.env.ABACATEPAY_WEBHOOK_SECRET || 'webh_prod_GxjhThqfPrP1ZJ54frXeGaXs';
-const VALID_WEBHOOK_SECRETS = ['webh_prod_GxjhThqfPrP1ZJ54frXeGaXs', 'mz_whsec_99762785abacate'];
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || 'APP_USR-2207563349086564-082708-c96459588956e75d8b1def743ef226db-2247952099';
+const MP_PUBLIC_KEY = process.env.NEXT_PUBLIC_MP_PUBLIC_KEY || 'APP_USR-22bf5c71-dac7-4300-ba28-2229a783ea01';
+const MP_CLIENT_ID = process.env.MP_CLIENT_ID || '2207563349086564';
+const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'yzwJniOnkcV7XaBQHak1z5A1680XlMbK';
 
 const PAYMENTS_FILE = path.join(__dirname, '.payments_data.json');
 
@@ -145,7 +146,8 @@ function loadPaymentsData() {
     balance: 0,
     totalSales: 0,
     transactions: [],
-    withdrawals: []
+    withdrawals: [],
+    orders: []
   };
 }
 
@@ -157,94 +159,102 @@ function savePaymentsData(data) {
   }
 }
 
-// ── 1. Criar Cobrança Pix AbacatePay ──────────────────────────
+// ── 1. Criar Cobrança Pix no Mercado Pago ─────────────────────
 app.post('/api/payment/create-pix', async (req, res) => {
   try {
-    const { orderId, amount, clientName, clientPhone, clientEmail, itemsDescription } = req.body;
-    if (!amount || amount <= 0) {
+    const { orderId, amount, clientName, clientPhone, clientEmail, address, deliveryType, notes, items, restaurant } = req.body;
+    if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ ok: false, error: 'Valor inválido' });
     }
 
-    const priceInCents = Math.round(Number(amount) * 100);
     const orderNum = orderId || Math.floor(1000 + Math.random() * 9000);
+    const nameParts = (clientName || 'Cliente').trim().split(' ');
+    const firstName = nameParts[0] || 'Cliente';
+    const lastName = nameParts.slice(1).join(' ') || 'MenuZaps';
+    const email = clientEmail || 'cliente@menuzaps.com';
 
-    // 1. Criar produto dinâmico para a cobrança
-    const prodRes = await fetch('https://api.abacatepay.com/v2/products/create', {
+    // Criar Pagamento Pix Oficial Mercado Pago
+    const mpRes = await fetch('https://api.mercadopago.com/v1/payments', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': `order_${orderNum}_${Date.now()}`
       },
       body: JSON.stringify({
-        externalId: `order_${orderNum}_${Date.now()}`,
-        name: `Pedido MenuZaps #${orderNum}`,
-        description: itemsDescription || `Pedido #${orderNum} - ${clientName || 'Cliente'}`,
-        price: priceInCents,
-        currency: 'BRL'
-      })
-    });
-
-    const prodData = await prodRes.json();
-    if (!prodData.success || !prodData.data?.id) {
-      return res.status(500).json({ ok: false, error: prodData.error || 'Falha ao criar produto na AbacatePay' });
-    }
-
-    const productId = prodData.data.id;
-
-    // 2. Criar checkout Pix
-    const checkRes = await fetch('https://api.abacatepay.com/v2/checkouts/create', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        frequency: 'ONE_TIME',
-        methods: ['PIX'],
-        items: [
-          {
-            id: productId,
-            quantity: 1
-          }
-        ],
-        customer: {
-          name: clientName || 'Cliente MenuZaps',
-          cellphone: clientPhone ? clientPhone.replace(/\D/g, '') : '66999762785',
-          email: clientEmail || 'cliente@menuzaps.com'
+        transaction_amount: Number(amount),
+        description: `Pedido MenuZaps #${orderNum} - ${clientName || 'Cliente'}`,
+        payment_method_id: 'pix',
+        payer: {
+          email: email,
+          first_name: firstName,
+          last_name: lastName
         },
-        returnUrl: 'https://menuzaps.vercel.app/cardapio.html?payment=success',
-        completionUrl: 'https://menuzaps.vercel.app/cardapio.html?payment=success'
+        notification_url: 'https://menuzaps-wa-server.onrender.com/api/payment/webhook'
       })
     });
 
-    const checkData = await checkRes.json();
-    if (!checkData.success || !checkData.data?.url) {
-      return res.status(500).json({ ok: false, error: checkData.error || 'Falha ao gerar checkout Pix' });
+    const mpData = await mpRes.json();
+    if (!mpRes.ok || !mpData.id) {
+      console.error('Erro Mercado Pago API:', mpData);
+      return res.status(500).json({ ok: false, error: mpData.message || 'Falha ao gerar cobrança Pix no Mercado Pago' });
     }
 
-    const billing = checkData.data;
+    const paymentId = String(mpData.id);
+    const txData = mpData.point_of_interaction?.transaction_data || {};
+    const qrCode = txData.qr_code || '';
+    const qrCodeBase64 = txData.qr_code_base64 || '';
+    const ticketUrl = txData.ticket_url || '';
 
-    // Registrar transação pendente no storage
     const db = loadPaymentsData();
+    if (!db.orders) db.orders = [];
+
     const newTx = {
-      billingId: billing.id,
+      billingId: paymentId,
       orderId: orderNum,
       clientName: clientName || 'Cliente',
       clientPhone: clientPhone || '',
       grossAmount: Number(amount),
-      fee: (billing.platformFee || 100) / 100,
-      netAmount: Math.max(0, Number(amount) - ((billing.platformFee || 100) / 100)),
-      paymentUrl: billing.url,
+      fee: mpData.fee_details?.[0]?.amount || 0.99,
+      netAmount: Math.max(0, Number(amount) - (mpData.fee_details?.[0]?.amount || 0.99)),
+      qrCode: qrCode,
+      qrCodeBase64: qrCodeBase64,
+      paymentUrl: ticketUrl,
       status: 'PENDING',
       createdAt: new Date().toISOString()
     };
     db.transactions.unshift(newTx);
+
+    const newOrder = {
+      id: orderNum,
+      billingId: paymentId,
+      client: clientName || 'Cliente',
+      phone: clientPhone || '',
+      addr: address || '',
+      type: deliveryType || 'delivery',
+      items: items || 'Itens do Cardápio',
+      notes: notes || '',
+      value: Number(amount),
+      payment: 'PIX (Mercado Pago)',
+      pixUrl: ticketUrl,
+      qrCode: qrCode,
+      qrCodeBase64: qrCodeBase64,
+      restaurant: restaurant || 'Estabelecimento',
+      status: 'pending_payment',
+      time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      ago: 'agora',
+      createdAt: new Date().toISOString()
+    };
+    db.orders.unshift(newOrder);
     savePaymentsData(db);
 
     res.json({
       ok: true,
-      billingId: billing.id,
-      paymentUrl: billing.url,
+      billingId: paymentId,
+      paymentId: paymentId,
+      paymentUrl: ticketUrl,
+      qrCode: qrCode,
+      qrCodeBase64: qrCodeBase64,
       orderId: orderNum,
       amount: Number(amount)
     });
@@ -254,85 +264,136 @@ app.post('/api/payment/create-pix', async (req, res) => {
   }
 });
 
-// ── 2. Checar Status de Cobrança ──────────────────────────────
-app.get('/api/payment/status/:billingId', async (req, res) => {
+// ── 2. Checar Status de Cobrança Pix (Mercado Pago) ─────────────
+app.get('/api/payment/status/:paymentId', async (req, res) => {
   try {
-    const { billingId } = req.params;
+    const { paymentId } = req.params;
     const db = loadPaymentsData();
-    const tx = db.transactions.find(t => t.billingId === billingId);
+    const tx = db.transactions.find(t => String(t.billingId) === String(paymentId) || String(t.orderId) === String(paymentId));
 
-    // Consultar na AbacatePay
-    const apiRes = await fetch(`https://api.abacatepay.com/v2/checkouts/list`, {
-      headers: {
-        'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
-        'Content-Type': 'application/json'
+    let isApproved = false;
+    let mpStatus = 'pending';
+
+    try {
+      const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+        headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
+      });
+      const mpData = await mpRes.json();
+      if (mpData && mpData.status) {
+        mpStatus = mpData.status;
+        isApproved = (mpData.status === 'approved');
       }
-    });
-    const apiData = await apiRes.json();
-    const foundBill = apiData.data?.find(b => b.id === billingId);
+    } catch(e) {}
 
-    if (foundBill) {
-      const isPaid = foundBill.status === 'PAID';
-      if (tx && tx.status !== 'PAID' && isPaid) {
-        tx.status = 'PAID';
-        tx.paidAt = new Date().toISOString();
-        db.balance += tx.netAmount;
-        db.totalSales += tx.grossAmount;
-        savePaymentsData(db);
-      }
-      return res.json({ ok: true, status: foundBill.status, isPaid, tx });
-    }
-
-    res.json({ ok: true, status: tx?.status || 'PENDING', isPaid: tx?.status === 'PAID', tx });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ── 3. Webhook de Confirmação AbacatePay ───────────────────────
-app.post('/api/payment/webhook', async (req, res) => {
-  try {
-    const secretQuery = req.query.secret;
-    const secretHeader = req.headers['abacatepay-signature'] || req.headers['x-webhook-secret'] || req.headers['webhook-id'];
-
-    // Validação de Secret
-    const isSecretValid = !secretQuery || VALID_WEBHOOK_SECRETS.includes(secretQuery) || (secretHeader && VALID_WEBHOOK_SECRETS.includes(secretHeader));
-    if (!isSecretValid) {
-      console.warn('Webhook recebido com secret não reconhecido:', secretQuery || secretHeader);
-    }
-
-    const payload = req.body;
-    console.log('Webhook AbacatePay recebido:', JSON.stringify(payload));
-
-    const event = payload.event || payload.type;
-    const data = payload.data || payload;
-
-    if (event === 'billing.paid' || data.status === 'PAID' || event === 'BILLING_PAID') {
-      const billingId = data.id;
-      const db = loadPaymentsData();
-      const tx = db.transactions.find(t => t.billingId === billingId);
-
+    if (isApproved) {
       if (tx && tx.status !== 'PAID') {
         tx.status = 'PAID';
         tx.paidAt = new Date().toISOString();
         db.balance += tx.netAmount;
         db.totalSales += tx.grossAmount;
+
+        if (!db.orders) db.orders = [];
+        const order = db.orders.find(o => String(o.billingId) === String(paymentId) || o.id === tx.orderId);
+        if (order) {
+          order.status = 'new';
+          order.paid = true;
+          order.paidAt = new Date().toISOString();
+        }
         savePaymentsData(db);
 
-        // Notificar restaurante via WhatsApp se conectado
-        if (connectionStatus === 'connected' && sock && connectedPhone) {
-          try {
-            const jids = buildJids(connectedPhone);
-            await sock.sendMessage(jids[0], {
-              text: `🟢 *PIX RECEBIDO COM SUCESSO!*\n\n` +
-                    `📦 *Pedido:* #${tx.orderId}\n` +
-                    `👤 *Cliente:* ${tx.clientName}\n` +
-                    `💰 *Valor Bruto:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n` +
-                    `💵 *Valor Líquido:* R$ ${tx.netAmount.toFixed(2).replace('.', ',')}\n` +
-                    `✨ O saldo já está disponível no seu painel!`
-            });
-          } catch(e) {
-            console.error('Erro ao notificar via WA:', e);
+        // Notificar restaurante e cliente via WhatsApp se conectado
+        if (connectionStatus === 'connected' && sock) {
+          if (connectedPhone) {
+            try {
+              const jids = buildJids(connectedPhone);
+              await sock.sendMessage(jids[0], {
+                text: `🟢 *PIX RECEBIDO (MERCADO PAGO)!*\n\n` +
+                      `📦 *Pedido:* #${tx.orderId}\n` +
+                      `👤 *Cliente:* ${tx.clientName}\n` +
+                      `💰 *Valor:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n` +
+                      `✨ O pedido foi enviado para a cozinha!`
+              });
+            } catch(e) {}
+          }
+          if (tx.clientPhone) {
+            try {
+              const clientJids = buildJids(tx.clientPhone);
+              await sock.sendMessage(clientJids[0], {
+                text: `🎉 *Olá, ${tx.clientName}! Seu PIX foi CONFIRMADO pelo Mercado Pago!*\n\n` +
+                      `📦 *Pedido:* #${tx.orderId}\n` +
+                      `💰 *Valor Pago:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n\n` +
+                      `👨‍🍳 O seu pedido foi enviado para a cozinha e em instantes iniciaremos o preparo! 🍳`
+              });
+            } catch(e) {}
+          }
+        }
+      }
+      return res.json({ ok: true, status: 'approved', isPaid: true, tx });
+    }
+
+    res.json({ ok: true, status: mpStatus, isPaid: isApproved, tx });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 3. Webhook de Confirmação Mercado Pago ─────────────────────
+app.post('/api/payment/webhook', async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log('Webhook Mercado Pago recebido:', JSON.stringify(payload), req.query);
+
+    const paymentId = payload?.data?.id || req.query['data.id'] || req.query.id || payload?.id;
+
+    if (paymentId) {
+      const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+        headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
+      });
+      const mpData = await mpRes.json();
+
+      if (mpData && mpData.status === 'approved') {
+        const db = loadPaymentsData();
+        const tx = db.transactions.find(t => String(t.billingId) === String(paymentId) || String(t.orderId) === String(mpData.external_reference));
+
+        if (tx && tx.status !== 'PAID') {
+          tx.status = 'PAID';
+          tx.paidAt = new Date().toISOString();
+          db.balance += tx.netAmount;
+          db.totalSales += tx.grossAmount;
+
+          if (!db.orders) db.orders = [];
+          const order = db.orders.find(o => String(o.billingId) === String(paymentId) || o.id === tx.orderId);
+          if (order) {
+            order.status = 'new';
+            order.paid = true;
+            order.paidAt = new Date().toISOString();
+          }
+          savePaymentsData(db);
+
+          if (connectionStatus === 'connected' && sock) {
+            if (connectedPhone) {
+              try {
+                const jids = buildJids(connectedPhone);
+                await sock.sendMessage(jids[0], {
+                  text: `🟢 *PIX RECEBIDO (MERCADO PAGO)!*\n\n` +
+                        `📦 *Pedido:* #${tx.orderId}\n` +
+                        `👤 *Cliente:* ${tx.clientName}\n` +
+                        `💰 *Valor:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n` +
+                        `✨ O pedido foi enviado para a cozinha!`
+                });
+              } catch(e) {}
+            }
+            if (tx.clientPhone) {
+              try {
+                const clientJids = buildJids(tx.clientPhone);
+                await sock.sendMessage(clientJids[0], {
+                  text: `🎉 *Olá, ${tx.clientName}! Seu PIX foi CONFIRMADO pelo Mercado Pago!*\n\n` +
+                        `📦 *Pedido:* #${tx.orderId}\n` +
+                        `💰 *Valor Pago:* R$ ${tx.grossAmount.toFixed(2).replace('.', ',')}\n\n` +
+                        `👨‍🍳 O seu pedido foi enviado para a cozinha e em instantes iniciaremos o preparo! 🍳`
+                });
+              } catch(e) {}
+            }
           }
         }
       }
@@ -340,7 +401,7 @@ app.post('/api/payment/webhook', async (req, res) => {
 
     res.json({ received: true });
   } catch (err) {
-    console.error('Erro no webhook:', err);
+    console.error('Erro no webhook Mercado Pago:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -372,109 +433,25 @@ app.get('/api/payment/finance-summary', (req, res) => {
   }
 });
 
-// ── 5. Solicitar Saque Pix (AbacatePay Payouts API) ─────────────
-app.post('/api/payment/request-withdrawal', async (req, res) => {
+// ── 5. Informações de Saque (Mercado Pago) ─────────────────────
+app.post('/api/payment/request-withdrawal', (req, res) => {
   try {
-    const { amount, pixKey, pixKeyType } = req.body;
-    const withdrawAmount = Number(amount);
-    if (!withdrawAmount || withdrawAmount < 3.50) {
-      return res.status(400).json({ ok: false, error: 'O valor mínimo para saque via Pix na AbacatePay é de R$ 3,50' });
-    }
-    if (!pixKey) {
-      return res.status(400).json({ ok: false, error: 'Chave Pix é obrigatória' });
-    }
-
-    const db = loadPaymentsData();
-    if (db.balance < withdrawAmount) {
-      return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível: R$ ${db.balance.toFixed(2).replace('.', ',')}` });
-    }
-
-    // Mapear tipo de chave Pix para a AbacatePay
-    let abacatePixType = 'RANDOM';
-    const cleanKey = pixKey.replace(/\D/g, '');
-    if (pixKeyType === 'CPF' || cleanKey.length === 11) abacatePixType = 'CPF';
-    else if (pixKeyType === 'CNPJ' || cleanKey.length === 14) abacatePixType = 'CNPJ';
-    else if (pixKey.includes('@')) abacatePixType = 'EMAIL';
-    else if (cleanKey.length >= 10 && cleanKey.length <= 13) abacatePixType = 'PHONE';
-
-    // Tentar executar Saque Automático Real via API AbacatePay
-    let apiSuccess = false;
-    let apiErrorMsg = null;
-    let receiptUrl = null;
-
-    try {
-      const amountInCents = Math.round(withdrawAmount * 100);
-      const abacateRes = await fetch('https://api.abacatepay.com/v2/payouts/create', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${ABACATEPAY_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          amount: amountInCents,
-          externalId: 'wd_' + Date.now(),
-          description: 'Saque MenuZaps',
-          pix: {
-            key: pixKey.trim(),
-            type: abacatePixType
-          }
-        })
-      });
-
-      const abacateData = await abacateRes.json();
-      if (abacateData.success && abacateData.data) {
-        apiSuccess = true;
-        receiptUrl = abacateData.data.receiptUrl;
-      } else {
-        apiErrorMsg = abacateData.error || 'Falha ao processar saque na AbacatePay';
-      }
-    } catch (apiErr) {
-      apiErrorMsg = apiErr.message;
-    }
-
-    // Se a API transferiu com sucesso:
-    if (apiSuccess) {
-      db.balance -= withdrawAmount;
-      const newWithdrawal = {
-        id: 'wd_' + Date.now(),
-        amount: withdrawAmount,
-        pixKey: pixKey,
-        pixKeyType: pixKeyType || 'Pix',
-        status: 'COMPLETED',
-        receiptUrl: receiptUrl,
-        requestedAt: new Date().toISOString()
-      };
-      db.withdrawals.unshift(newWithdrawal);
-      savePaymentsData(db);
-
-      return res.json({
-        ok: true,
-        message: `🎉 Saque de R$ ${withdrawAmount.toFixed(2).replace('.', ',')} enviado com sucesso via Pix para ${pixKey}!`,
-        newBalance: db.balance,
-        withdrawal: newWithdrawal
-      });
-    }
-
-    // Se a função de saque automatizado via API ainda não foi habilitada na conta AbacatePay:
-    return res.status(400).json({
-      ok: false,
-      abacateDisabled: true,
-      error: `Para transferir diretamente pelo botão, habilite a função de Saques/Payouts no painel da AbacatePay. Você também pode sacar todo o seu saldo acumulado diretamente no app da AbacatePay (https://app.abacatepay.com).`
+    res.json({
+      ok: true,
+      message: 'O seu dinheiro está seguro e disponível diretamente na sua conta do Mercado Pago! Você pode transferir via Pix para qualquer banco a qualquer momento pelo app do Mercado Pago.'
     });
-
   } catch (err) {
-    console.error('Erro request-withdrawal:', err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// ── 6. Simular Venda Pix (Para testes rápidos do dono) ─────────
+// ── 6. Simular Venda Pix (Para testes rápidos) ─────────────────
 app.post('/api/payment/simulate-pix', (req, res) => {
   try {
     const { orderId, amount, clientName } = req.body;
     const val = Number(amount) || 32.90;
     const orderNum = orderId || Math.floor(1000 + Math.random() * 9000);
-    const fee = 0.80;
+    const fee = 0.99;
     const net = Math.max(0, val - fee);
 
     const db = loadPaymentsData();
@@ -507,7 +484,6 @@ app.post('/api/payment/simulate-pix', (req, res) => {
   }
 });
 
-
 // ── 7. Criar Pedido Balcão/Entrega (Dinheiro ou Cartão na Entrega) ──
 app.post('/api/orders/create', (req, res) => {
   try {
@@ -527,7 +503,7 @@ app.post('/api/orders/create', (req, res) => {
       value: Number(amount) || 0,
       payment: paymentMethod || 'Dinheiro / Cartão na Entrega',
       restaurant: restaurant || 'Estabelecimento',
-      status: 'new', // Dinheiro/Cartão entra direto para a cozinha
+      status: 'new',
       time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       ago: 'agora',
       createdAt: new Date().toISOString()
@@ -536,7 +512,6 @@ app.post('/api/orders/create', (req, res) => {
     db.orders.unshift(newOrder);
     savePaymentsData(db);
 
-    // Notificar WhatsApp se conectado
     if (connectionStatus === 'connected' && sock && connectedPhone) {
       try {
         const jids = buildJids(connectedPhone);
@@ -564,14 +539,12 @@ app.get('/api/orders/live', (req, res) => {
   try {
     const db = loadPaymentsData();
     if (!db.orders) db.orders = [];
-    // Retorna apenas pedidos confirmados (exclui os Pix pendentes de pagamento)
     const confirmedOrders = db.orders.filter(o => o.status !== 'pending_payment');
     res.json({ ok: true, orders: confirmedOrders.slice(0, 50) });
   } catch(err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
 
 // ── 9. Atualizar Etapa do Pedido e Notificar Cliente no WhatsApp ──
 app.post('/api/orders/update-status', async (req, res) => {
@@ -591,7 +564,6 @@ app.post('/api/orders/update-status', async (req, res) => {
     const type = deliveryType || order?.type || 'delivery';
     const addr = address || order?.addr || '';
 
-    // Enviar mensagem automática correspondente à etapa
     if (connectionStatus === 'connected' && sock && phone) {
       try {
         const jids = buildJids(phone);
@@ -631,7 +603,7 @@ app.get('/', (req, res) => res.json({
   service: 'MenuZaps WA & Payments Server',
   status: connectionStatus,
   phone: connectedPhone,
-  abacatePay: 'Active (v2)'
+  mercadoPago: 'Active (v1 Payments)'
 }));
 
 app.listen(PORT, () => {
