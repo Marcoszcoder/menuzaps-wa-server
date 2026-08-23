@@ -433,13 +433,112 @@ app.get('/api/payment/finance-summary', (req, res) => {
   }
 });
 
-// ── 5. Informações de Saque (Mercado Pago) ─────────────────────
-app.post('/api/payment/request-withdrawal', (req, res) => {
+// ── 5. Solicitar Saque Pix pelo Lojista ─────────────────────────
+app.post('/api/payment/request-withdrawal', async (req, res) => {
   try {
+    const { amount, pixKey, pixKeyType, storeName, ownerEmail, ownerPhone } = req.body;
+    const withdrawAmount = Number(amount);
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res.status(400).json({ ok: false, error: 'Informe um valor de saque válido' });
+    }
+    if (!pixKey) {
+      return res.status(400).json({ ok: false, error: 'Chave Pix é obrigatória' });
+    }
+
+    const db = loadPaymentsData();
+    if (db.balance < withdrawAmount) {
+      return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível: R$ ${db.balance.toFixed(2).replace('.', ',')}` });
+    }
+
+    db.balance -= withdrawAmount;
+
+    const newWithdrawal = {
+      id: 'wd_' + Date.now(),
+      storeName: storeName || 'Estabelecimento',
+      ownerEmail: ownerEmail || '',
+      ownerPhone: ownerPhone || '',
+      amount: withdrawAmount,
+      pixKey: pixKey.trim(),
+      pixKeyType: pixKeyType || 'CPF/CNPJ',
+      status: 'PENDING', // Aguardando transferência Pix pelo Admin Master
+      requestedAt: new Date().toISOString()
+    };
+
+    if (!db.withdrawals) db.withdrawals = [];
+    db.withdrawals.unshift(newWithdrawal);
+    savePaymentsData(db);
+
+    // Notificar o Admin Master via WhatsApp
+    if (connectionStatus === 'connected' && sock && connectedPhone) {
+      try {
+        const jids = buildJids(connectedPhone);
+        sock.sendMessage(jids[0], {
+          text: `🔔 *NOVA SOLICITAÇÃO DE SAQUE PIX!*` + '\n\n' +
+                `🏢 *Estabelecimento:* ${newWithdrawal.storeName}` + '\n' +
+                `💰 *Valor:* R$ ${newWithdrawal.amount.toFixed(2).replace('.', ',')}` + '\n' +
+                `🔑 *Chave Pix (${newWithdrawal.pixKeyType}):* ${newWithdrawal.pixKey}` + '\n' +
+                `📱 *WhatsApp Lojista:* ${newWithdrawal.ownerPhone || 'Não informado'}` + '\n\n' +
+                `👉 Acesse seu painel admin.html para aprovar e transferir o Pix!`
+        }).catch(() => {});
+      } catch(e) {}
+    }
+
     res.json({
       ok: true,
-      message: 'O seu dinheiro está seguro e disponível diretamente na sua conta do Mercado Pago! Você pode transferir via Pix para qualquer banco a qualquer momento pelo app do Mercado Pago.'
+      message: `Saque de R$ ${withdrawAmount.toFixed(2).replace('.', ',')} solicitado com sucesso! A transferência Pix será realizada para a chave ${pixKey}.`,
+      newBalance: db.balance,
+      withdrawal: newWithdrawal
     });
+  } catch (err) {
+    console.error('Erro request-withdrawal:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 5.1. Listar Saques para o Painel Admin Master ─────────────
+app.get('/api/admin/withdrawals', (req, res) => {
+  try {
+    const db = loadPaymentsData();
+    res.json({ ok: true, withdrawals: db.withdrawals || [] });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 5.2. Aprovar e Marcar Saque como Concluído ─────────────────
+app.post('/api/admin/withdrawals/approve', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const db = loadPaymentsData();
+    if (!db.withdrawals) db.withdrawals = [];
+
+    const wd = db.withdrawals.find(w => w.id === id);
+    if (!wd) {
+      return res.status(404).json({ ok: false, error: 'Saque não encontrado' });
+    }
+
+    wd.status = 'COMPLETED';
+    wd.completedAt = new Date().toISOString();
+    savePaymentsData(db);
+
+    // Notificar o Lojista no WhatsApp dele avisando que o Pix foi enviado
+    if (connectionStatus === 'connected' && sock && wd.ownerPhone) {
+      try {
+        const clientJids = buildJids(wd.ownerPhone);
+        sock.sendMessage(clientJids[0], {
+          text: `🎉 *Olá, ${wd.storeName}! Seu SAQUE foi ENVIADO COM SUCESSO!*\n\n` +
+                `💰 *Valor Transferido:* R$ ${wd.amount.toFixed(2).replace('.', ',')}\n` +
+                `🔑 *Chave Pix:* ${wd.pixKey} (${wd.pixKeyType})\n\n` +
+                `✨ O dinheiro já foi enviado para a sua conta bancária. Boas vendas e obrigado pela parceria com o MenuZaps! 🚀`
+        }).catch(() => {});
+      } catch(e) {}
+    }
+
+    res.json({ ok: true, message: 'Saque marcado como concluído com sucesso!', withdrawal: wd });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
