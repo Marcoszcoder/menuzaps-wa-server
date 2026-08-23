@@ -752,3 +752,39 @@ app.listen(PORT, () => {
 });
 
 
+
+
+// ── 10. Salvar Configurações e Produtos da Loja (Sincronização Nuvem PC + Celular) ──
+app.post('/api/store/save-config', (req, res) => {
+  try {
+    const { slug, config, products } = req.body;
+    const storeSlug = slug || 'pizzaria-bella-napoli';
+    const db = loadPaymentsData();
+    if (!db.stores) db.stores = {};
+
+    db.stores[storeSlug] = {
+      config: config || {},
+      products: products || [],
+      updatedAt: new Date().toISOString()
+    };
+
+    savePaymentsData(db);
+    res.json({ ok: true, message: 'Dados da loja sincronizados na nuvem!' });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 11. Carregar Configurações e Produtos da Loja na Nuvem ──
+app.get('/api/store/config', (req, res) => {
+  try {
+    const storeSlug = req.query.slug || 'pizzaria-bella-napoli';
+    const db = loadPaymentsData();
+    if (db.stores && db.stores[storeSlug]) {
+      return res.json({ ok: true, store: db.stores[storeSlug] });
+    }
+    res.json({ ok: false, message: 'Loja não encontrada na nuvem' });
+  } catch(err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
