@@ -736,10 +736,13 @@ app.get('/', (req, res) => res.json({
 }));
 
 
-// ── 10. Salvar Configurações e Produtos da Loja (Sincronização Nuvem PC + Celular) ──
-app.post('/api/store/save-config', (req, res) => {
+
+// ── 10. Salvar Configurações e Produtos da Loja (Sincronização Nuvem Global) ──
+app.all('/api/store/save-config', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
   try {
-    const { slug, config, products } = req.body;
+    const { slug, config, products } = req.body || {};
     const storeSlug = slug || 'pizzaria-bella-napoli';
     const db = loadPaymentsData();
     if (!db.stores) db.stores = {};
@@ -758,18 +761,21 @@ app.post('/api/store/save-config', (req, res) => {
 });
 
 // ── 11. Carregar Configurações e Produtos da Loja na Nuvem ──
-app.get('/api/store/config', (req, res) => {
+app.all('/api/store/config', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
   try {
-    const storeSlug = req.query.slug || 'pizzaria-bella-napoli';
+    const storeSlug = req.query.slug || (req.body && req.body.slug) || 'pizzaria-bella-napoli';
     const db = loadPaymentsData();
     if (db.stores && db.stores[storeSlug]) {
       return res.json({ ok: true, store: db.stores[storeSlug] });
     }
-    res.json({ ok: false, message: 'Loja não encontrada na nuvem' });
+    res.json({ ok: false, message: 'Loja não encontrada na nuvem', store: null });
   } catch(err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log('MenuZaps Server na porta ' + PORT);
