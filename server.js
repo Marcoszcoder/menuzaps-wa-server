@@ -159,6 +159,36 @@ function savePaymentsData(data) {
   }
 }
 
+
+// ── 0. Validar Access Token do Mercado Pago do Lojista ─────────
+app.post('/api/payment/validate-token', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string' || !token.trim().startsWith('APP_USR')) {
+      return res.status(400).json({ ok: false, error: 'O Access Token de produção deve começar com "APP_USR-"' });
+    }
+
+    const mpRes = await fetch('https://api.mercadopago.com/users/me', {
+      headers: { 'Authorization': `Bearer ${token.trim()}` }
+    });
+    const mpData = await mpRes.json();
+
+    if (mpRes.ok && mpData.id) {
+      const name = mpData.first_name ? `${mpData.first_name} ${mpData.last_name || ''}`.trim() : (mpData.nickname || 'Conta Mercado Pago');
+      return res.json({
+        ok: true,
+        accountName: name,
+        email: mpData.email || '',
+        id: mpData.id
+      });
+    }
+
+    return res.status(400).json({ ok: false, error: 'Access Token inválido ou não encontrado no Mercado Pago. Verifique suas credenciais de produção.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── 1. Criar Cobrança Pix no Mercado Pago (Multi-Tenant / Split) ─
 app.post('/api/payment/create-pix', async (req, res) => {
   try {
