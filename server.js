@@ -159,10 +159,10 @@ function savePaymentsData(data) {
   }
 }
 
-// ── 1. Criar Cobrança Pix no Mercado Pago ─────────────────────
+// ── 1. Criar Cobrança Pix no Mercado Pago (Multi-Tenant / Split) ─
 app.post('/api/payment/create-pix', async (req, res) => {
   try {
-    const { orderId, amount, clientName, clientPhone, clientEmail, address, deliveryType, notes, items, restaurant } = req.body;
+    const { orderId, amount, clientName, clientPhone, clientEmail, address, deliveryType, notes, items, restaurant, storeMpAccessToken } = req.body;
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ ok: false, error: 'Valor inválido' });
     }
@@ -177,7 +177,7 @@ app.post('/api/payment/create-pix', async (req, res) => {
     const mpRes = await fetch('https://api.mercadopago.com/v1/payments', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
+        'Authorization': `Bearer ${(storeMpAccessToken && storeMpAccessToken.startsWith('APP_USR')) ? storeMpAccessToken.trim() : MP_ACCESS_TOKEN}`,
         'Content-Type': 'application/json',
         'X-Idempotency-Key': `order_${orderNum}_${Date.now()}`
       },
