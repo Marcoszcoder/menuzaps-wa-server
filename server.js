@@ -228,7 +228,7 @@ app.post('/api/admin/log-security', (req, res) => {
 // ── 1. Criar Cobrança Pix AbacatePay ──────────────────────────
 app.post('/api/payment/create-pix', async (req, res) => {
   try {
-    const { orderId, amount, clientName, clientPhone, clientEmail, itemsDescription } = req.body;
+    const { orderId, amount, clientName, clientPhone, clientEmail, itemsDescription, storeSlug, restaurant } = req.body;
     if (!amount || amount <= 0) {
       return res.status(400).json({ ok: false, error: 'Valor inválido' });
     }
@@ -304,7 +304,9 @@ app.post('/api/payment/create-pix', async (req, res) => {
       netAmount: Math.max(0, Number(amount) - ((billing.platformFee || 100) / 100)),
       paymentUrl: billing.url,
       status: 'PENDING',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      storeSlug: storeSlug || 'pizzaria-bella-napoli',
+      restaurant: restaurant || 'Pizzaria Bella Napoli'
     };
     db.transactions.unshift(newTx);
     savePaymentsData(db);
@@ -421,22 +423,35 @@ app.get('/api/payment/finance-summary', (req, res) => {
   try {
     const db = loadPaymentsData();
     const today = new Date().toISOString().slice(0, 10);
-    const todaySales = db.transactions
-      .filter(t => t.status === 'PAID' && t.createdAt.startsWith(today))
-      .reduce((acc, t) => acc + t.grossAmount, 0);
+    const { store } = req.query;
 
-    const totalWithdrawn = db.withdrawals
-      .filter(w => w.status === 'COMPLETED')
-      .reduce((acc, w) => acc + w.amount, 0);
+    let transactions = db.transactions || [];
+    let withdrawals = db.withdrawals || [];
+
+    if (store) {
+      transactions = transactions.filter(t => (t.storeSlug && t.storeSlug === store) || (t.restaurant && t.restaurant.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') === store));
+      withdrawals = withdrawals.filter(w => (w.storeSlug && w.storeSlug === store) || (w.storeName && w.storeName.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') === store));
+    }
+
+    const paidTxs = transactions.filter(t => t.status === 'PAID');
+    const completedWds = withdrawals.filter(w => w.status === 'COMPLETED');
+
+    const totalSales = paidTxs.reduce((sum, t) => sum + Number(t.grossAmount || 0), 0);
+    const totalNet = paidTxs.reduce((sum, t) => sum + Number(t.netAmount || 0), 0);
+    const todaySales = paidTxs.filter(t => t.createdAt && t.createdAt.startsWith(today)).reduce((sum, t) => sum + Number(t.grossAmount || 0), 0);
+    const totalWithdrawn = completedWds.reduce((sum, w) => sum + Number(w.amount || 0), 0);
+    
+    // Se for solicitado por uma loja especifica, o saldo é o líquido daquela loja menos os saques concluídos daquela loja
+    const balance = store ? Math.max(0, totalNet - totalWithdrawn) : Math.max(0, db.balance);
 
     res.json({
       ok: true,
-      balance: Math.max(0, db.balance),
-      totalSales: db.totalSales,
+      balance: balance,
+      totalSales: totalSales,
       todaySales: todaySales,
       totalWithdrawn: totalWithdrawn,
-      transactions: db.transactions.slice(0, 50),
-      withdrawals: db.withdrawals.slice(0, 20)
+      transactions: transactions.slice(0, 50),
+      withdrawals: withdrawals.slice(0, 20)
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -446,7 +461,7 @@ app.get('/api/payment/finance-summary', (req, res) => {
 // ── 5. Solicitar Saque Pix ────────────────────────────────────
 app.post('/api/payment/request-withdrawal', (req, res) => {
   try {
-    const { amount, pixKey, pixKeyType } = req.body;
+    const { amount, pixKey, pixKeyType, storeSlug, storeName, ownerEmail, ownerPhone } = req.body;
     const withdrawAmount = Number(amount);
     if (!withdrawAmount || withdrawAmount <= 0) {
       return res.status(400).json({ ok: false, error: 'Valor de saque inválido' });
@@ -456,8 +471,19 @@ app.post('/api/payment/request-withdrawal', (req, res) => {
     }
 
     const db = loadPaymentsData();
-    if (db.balance < withdrawAmount) {
-      return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível: R$ ${db.balance.toFixed(2).replace('.', ',')}` });
+    
+    // Calcular saldo disponível para esta loja específica se for enviado o slug
+    let storeBalance = db.balance;
+    if (storeSlug) {
+      const txs = db.transactions.filter(t => t.storeSlug === storeSlug && t.status === 'PAID');
+      const wds = db.withdrawals.filter(w => w.storeSlug === storeSlug && w.status === 'COMPLETED');
+      const totalNet = txs.reduce((acc, t) => acc + t.netAmount, 0);
+      const totalWithdrawn = wds.reduce((acc, w) => acc + w.amount, 0);
+      storeBalance = totalNet - totalWithdrawn;
+    }
+
+    if (storeBalance < withdrawAmount) {
+      return res.status(400).json({ ok: false, error: `Saldo insuficiente. Saldo disponível para saque: R$ ${storeBalance.toFixed(2).replace('.', ',')}` });
     }
 
     db.balance -= withdrawAmount;
@@ -467,12 +493,16 @@ app.post('/api/payment/request-withdrawal', (req, res) => {
       pixKey: pixKey,
       pixKeyType: pixKeyType || 'CPF/CNPJ',
       status: 'COMPLETED',
-      requestedAt: new Date().toISOString()
+      requestedAt: new Date().toISOString(),
+      storeSlug: storeSlug || 'pizzaria-bella-napoli',
+      storeName: storeName || 'Pizzaria Bella Napoli',
+      ownerEmail: ownerEmail || '',
+      ownerPhone: ownerPhone || ''
     };
     db.withdrawals.unshift(newWithdrawal);
     savePaymentsData(db);
 
-    logSecurityEvent('withdrawal_requested', 'WARN', `Saque Pix solicitado: R$ ${withdrawAmount.toFixed(2)} | Tipo: ${newWithdrawal.pixKeyType} | Chave: "${pixKey}"`, req);
+    logSecurityEvent('withdrawal_requested', 'WARN', `Saque Pix solicitado: R$ ${withdrawAmount.toFixed(2)} | Loja: ${newWithdrawal.storeName} (${storeSlug}) | Chave: "${pixKey}"`, req);
 
     res.json({
       ok: true,
@@ -488,7 +518,7 @@ app.post('/api/payment/request-withdrawal', (req, res) => {
 // ── 6. Simular Venda Pix (Para testes rápidos do dono) ─────────
 app.post('/api/payment/simulate-pix', (req, res) => {
   try {
-    const { orderId, amount, clientName } = req.body;
+    const { orderId, amount, clientName, storeSlug } = req.body;
     const val = Number(amount) || 32.90;
     const orderNum = orderId || Math.floor(1000 + Math.random() * 9000);
     const fee = 0.80;
@@ -506,7 +536,9 @@ app.post('/api/payment/simulate-pix', (req, res) => {
       paymentUrl: '#',
       status: 'PAID',
       createdAt: new Date().toISOString(),
-      paidAt: new Date().toISOString()
+      paidAt: new Date().toISOString(),
+      storeSlug: storeSlug || 'pizzaria-bella-napoli',
+      restaurant: storeSlug === 'hamburgeria-do-chef' ? 'Hamburgeria do Chef' : 'Pizzaria Bella Napoli'
     };
     db.transactions.unshift(newTx);
     db.balance += net;
