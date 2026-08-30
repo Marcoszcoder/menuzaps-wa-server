@@ -41,11 +41,11 @@ async function startWhatsApp() {
     sock = makeWASocket({ 
       version, 
       logger, 
-      browser: ['MenuZaps', 'Chrome', '20.0'],
+      browser: Browsers.macOS('Desktop'),
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) }, 
       printQRInTerminal: false, 
       syncFullHistory: false, 
-      markOnlineOnConnect: false
+      markOnlineOnConnect: true, keepAliveIntervalMs: 30000
     });
     
     sock.ev.on('creds.update', saveCreds);
