@@ -22,36 +22,75 @@ let connectedPhone = null;
 const logger = pino({ level: 'silent' });
 const AUTH_DIR = path.join(__dirname, '.wa_session');
 
+let isStarting = false;
 async function startWhatsApp() {
+  if (isStarting) return;
+  isStarting = true;
   try {
+    if (typeof sock !== 'undefined' && sock) {
+      sock.ev.removeAllListeners();
+      try { sock.end(undefined); } catch(e) {}
+    }
+    
     connectionStatus = 'connecting';
     qrBase64 = null;
+    
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-    sock = makeWASocket({ version, logger, browser: Browsers.ubuntu('MenuZaps'), auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) }, printQRInTerminal: false, syncFullHistory: false, markOnlineOnConnect: false });
+    
+    sock = makeWASocket({ 
+      version, 
+      logger, 
+      browser: ['MenuZaps', 'Chrome', '20.0'],
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) }, 
+      printQRInTerminal: false, 
+      syncFullHistory: false, 
+      markOnlineOnConnect: false
+    });
+    
     sock.ev.on('creds.update', saveCreds);
+    
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
+      
       if (qr) {
         qrBase64 = await QRCode.toDataURL(qr, { errorCorrectionLevel: 'M', width: 320, margin: 2, color: { dark: '#111827', light: '#ffffff' } });
         connectionStatus = 'qr_ready';
         console.log('QR Code gerado');
       }
+      
       if (connection === 'close') {
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        connectionStatus = 'disconnected'; connectedPhone = null; qrBase64 = null;
-        if (shouldReconnect) setTimeout(() => startWhatsApp(), 3000);
-        else if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        
+        console.log('Conexão fechada. Status code:', statusCode, 'Reconnect:', shouldReconnect);
+        
+        connectionStatus = 'disconnected'; 
+        if (!shouldReconnect) connectedPhone = null; 
+        qrBase64 = null;
+        
+        if (shouldReconnect) {
+          setTimeout(() => { startWhatsApp(); }, statusCode === 515 ? 1000 : 3000);
+        } else {
+          if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        }
       }
+      
       if (connection === 'open') {
-        connectionStatus = 'connected'; qrBase64 = null;
+        connectionStatus = 'connected'; 
+        qrBase64 = null;
         connectedPhone = sock.user?.id?.split(':')[0] || null;
         console.log('WhatsApp conectado:', connectedPhone);
       }
     });
+    
     sock.ev.on('messages.upsert', () => {});
-  } catch (err) { console.error('Erro:', err); connectionStatus = 'disconnected'; }
+  } catch (err) { 
+    console.error('Erro:', err); 
+    connectionStatus = 'disconnected'; 
+  } finally {
+    isStarting = false;
+  }
 }
 
 // Tenta formatos brasileiros: com e sem o 9° dígito
