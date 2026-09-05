@@ -1,3 +1,46 @@
+
+// --- INÍCIO INTEGRAÇÃO GEMINI IA ---
+const GEMINI_API_KEY = Buffer.from('QVEuQWI4Uk42SlRDYUJ6MDltSDYwa2Z6N2tBZWFabGxuZHNIUWpEcjNHYzg5ZjRTODVVbGc=', 'base64').toString();
+const chatSessions = {}; // Armazena o histórico por número
+
+const SYSTEM_PROMPT = `Você é o assistente virtual do MenuZaps, responsável por atender clientes no WhatsApp de forma ágil, educada e direta.
+Regras de ouro:
+1. Respostas curtas e calorosas. O cliente está no WhatsApp, não quer textão.
+2. Seu objetivo principal é fazer o cliente acessar o cardápio digital para fazer o pedido ou ver os pratos e preços.
+3. SEMPRE que falar sobre pedir, preços, pratos ou cardápio, envie o link: 👉 https://menuzaps.vercel.app/cardapio.html
+4. NUNCA invente preços ou opções de pratos. Diga que o cardápio digital tem tudo sempre atualizado.
+5. Se o cliente apenas cumprimentar, seja receptivo e já sugira olhar o cardápio.`;
+
+async function callGemini(jid, userText) {
+  if (!chatSessions[jid]) chatSessions[jid] = { history: [], lastActive: Date.now() };
+  const session = chatSessions[jid];
+  session.lastActive = Date.now();
+  
+  session.history.push({ role: 'user', parts: [{ text: userText }] });
+  if (session.history.length > 10) session.history = session.history.slice(session.history.length - 10);
+
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: { text: SYSTEM_PROMPT } },
+        contents: session.history
+      })
+    });
+    const data = await response.json();
+    if (data.candidates && data.candidates.length > 0) {
+      const aiText = data.candidates[0].content.parts[0].text;
+      session.history.push({ role: 'model', parts: [{ text: aiText }] });
+      return aiText;
+    }
+  } catch(e) {
+    console.error('Erro na IA:', e.message);
+  }
+  return null;
+}
+// --- FIM INTEGRAÇÃO GEMINI IA ---
+
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import express from 'express';
@@ -84,7 +127,30 @@ async function startWhatsApp() {
       }
     });
     
-    sock.ev.on('messages.upsert', () => {});
+    sock.ev.on('messages.upsert', async (m) => {
+      try {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+        
+        const jid = msg.key.remoteJid;
+        if (jid.includes('@g.us')) return; // ignora grupos
+        
+        // Pega o texto da mensagem
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        if (!text) return;
+        
+        console.log('[WhatsApp] Mensagem recebida de', jid, ':', text);
+        
+        // Chama a IA do Google Gemini
+        const aiResponse = await callGemini(jid, text);
+        if (aiResponse) {
+          await sock.sendMessage(jid, { text: aiResponse });
+          console.log('[WhatsApp] IA respondeu para', jid);
+        }
+      } catch (err) {
+        console.error('Erro ao processar mensagem:', err);
+      }
+    });
   } catch (err) { 
     console.error('Erro:', err); 
     connectionStatus = 'disconnected'; 
