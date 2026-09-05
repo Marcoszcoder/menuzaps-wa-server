@@ -20,15 +20,29 @@ async function callGemini(jid, userText) {
   if (session.history.length > 10) session.history = session.history.slice(session.history.length - 10);
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const https = require('https');
+    const data = await new Promise((resolve, reject) => {
+      const dataString = JSON.stringify({
         system_instruction: { parts: { text: SYSTEM_PROMPT } },
         contents: session.history
-      })
+      });
+      const req = https.request('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=' + GEMINI_API_KEY, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(dataString)
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        });
+      });
+      req.on('error', reject);
+      req.write(dataString);
+      req.end();
     });
-    const data = await response.json();
     if (data.candidates && data.candidates.length > 0) {
       const aiText = data.candidates[0].content.parts[0].text;
       session.history.push({ role: 'model', parts: [{ text: aiText }] });
@@ -136,7 +150,15 @@ async function startWhatsApp() {
         if (jid.includes('@g.us')) return; // ignora grupos
         
         // Pega o texto da mensagem
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+        let text = '';
+        if (msg.message.conversation) {
+          text = msg.message.conversation;
+        } else if (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) {
+          text = msg.message.extendedTextMessage.text;
+        } else if (msg.message.ephemeralMessage && msg.message.ephemeralMessage.message) {
+          const inner = msg.message.ephemeralMessage.message;
+          text = inner.conversation || (inner.extendedTextMessage && inner.extendedTextMessage.text) || '';
+        }
         if (!text) return;
         
         console.log('[WhatsApp] Mensagem recebida de', jid, ':', text);
