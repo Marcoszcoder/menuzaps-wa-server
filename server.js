@@ -53,6 +53,7 @@ async function callGemini(jid, userText) {
   }
   return null;
 }
+// v1788578246649
 // --- FIM INTEGRAÇÃO GEMINI IA ---
 
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, Browsers } from '@whiskeysockets/baileys';
