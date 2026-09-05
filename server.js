@@ -692,6 +692,23 @@ app.get('/', (req, res) => res.json({
   abacatePay: 'Active (v2)'
 }));
 
+
+const memLogs = [];
+const origLog = console.log;
+const origErr = console.error;
+console.log = function(...args) {
+  origLog.apply(console, args);
+  memLogs.push('[LOG] ' + args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
+  if (memLogs.length > 50) memLogs.shift();
+};
+console.error = function(...args) {
+  origErr.apply(console, args);
+  memLogs.push('[ERR] ' + args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '));
+  if (memLogs.length > 50) memLogs.shift();
+};
+
+app.get('/api/wa/logs', (req, res) => res.json({ logs: memLogs }));
+
 app.listen(PORT, () => {
   console.log('MenuZaps Server na porta ' + PORT);
   startWhatsApp();
